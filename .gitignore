@@ -1,0 +1,8 @@
+.env
+.DS_Store
+.venv/
+repos/
+worktrees/
+data/
+__pycache__/
+*.pyc
