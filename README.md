@@ -29,11 +29,25 @@ pip install -r requirements.txt
 - `GH_TOKEN` もしくは `GITHUB_TOKEN`（PR作成用）
 - （任意・非公式）`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`（サードパーティAPI向け）
 
-3. 起動
+3. 対象リポジトリを `repos/` 配下にクローン
+
+```bash
+mkdir -p repos
+git clone git@github.com:your_org/your_repo.git repos/your_repo
+```
+
+4. 起動
 
 ```bash
 python main.py
 ```
+
+## 対象リポジトリの準備
+- `repos/` 配下に **対象リポジトリを事前にクローン** しておく必要があります。
+- `.env` の `FORUM_REPO_MAP` は `repos/` 内のパスに合わせてください。
+- private リポジトリの場合、`git pull`/`git push` と `gh pr create` の両方に認証が必要です。
+  - `git` は SSH でもOKですが、`gh` は `GH_TOKEN`/`GITHUB_TOKEN` を使います。
+  - fine-grained PAT を使う場合は対象リポジトリにアクセス権を付与してください。
 
 ## FORUM_REPO_MAP の設定方法
 `FORUM_REPO_MAP` は「フォーラムチャンネルID -> リポジトリパス」の JSON です。
@@ -51,12 +65,15 @@ FORUM_REPO_MAP={"111111111111111111":"./repos/iMonos","222222222222222222":"./re
 
 ## 動作フロー
 1. フォーラムに新規スレッド作成
-2. Botがジョブを作成して「承認待ち」メッセージを投稿
-3. オーナーが `/approve_job` を実行
-4. 対象リポジトリに `git pull` → worktree 作成
-5. Claude Agent SDK で原因/仕様/修正を実施
-6. コミット & PR作成
-7. スレッドへ結果とPRリンクを投稿
+2. Botがジョブを作成し自動で処理開始
+3. 対象リポジトリに `git pull` → worktree 作成
+4. Claude Agent SDK で原因/仕様/修正を実施
+5. コミット & PR作成
+6. スレッドへ結果とPRリンクを投稿
+
+## コマンド
+- `/approve_job`: 失敗ジョブの再実行などに利用（オーナーのみ）
+- `/instruct_job`: 追加指示を送信して同じjobに再実行（オーナーのみ）
 
 ## Discord Developer Portal で必要な設定
 1. Bot タブ
@@ -76,14 +93,15 @@ Discord 側に古いスラッシュコマンド定義が残っている可能性
 これで起動時に **既存コマンドをクリア → 再同期** します。
 
 ## 注意点
-- すべての危険操作（git変更・外部コマンド）は `/approve` 後にのみ実行されます。
+- 本実装は **承認なしで自動実行** します（/approve_job は再実行用に残しています）。
 - Bot には `message_content` Intent が必要です（スレッド本文取得のため）。
 - フォーラムチャンネル側の権限として `send_messages_in_threads` などが必要です。
+- `repos/` と `worktrees/` はリポジトリ管理外です（.gitignore）。
 
 ## Z.AI を使いたい場合（Claude Code 公式外の経路）
-Claude Code / Claude Agent SDK は公式には Anthropic API を前提としています。citeturn0search3  
-一方、Z.AI の公式ドキュメントでは「Anthropic 互換」として `ANTHROPIC_BASE_URL` と `ANTHROPIC_AUTH_TOKEN` を設定する方法が紹介されています。citeturn0search0  
-Claude Code の公式ドキュメントでは `ANTHROPIC_BASE_URL` が明記されていないため、動作は保証されません（Z.AI側の案内に従う形になります）。citeturn0search3  
+Claude Code / Claude Agent SDK は公式には Anthropic API を前提としています。  
+一方、Z.AI の公式ドキュメントでは「Anthropic 互換」として `ANTHROPIC_BASE_URL` と `ANTHROPIC_AUTH_TOKEN` を設定する方法が紹介されています。  
+Claude Code の公式ドキュメントでは `ANTHROPIC_BASE_URL` が明記されていないため、動作は保証されません（Z.AI側の案内に従う形になります）。  
 
 動作する場合は `.env` に以下を設定してください：
 
