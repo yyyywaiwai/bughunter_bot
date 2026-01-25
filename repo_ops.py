@@ -71,6 +71,13 @@ def git_worktree_add(repo_path: Path, worktree_path: Path, branch: str, base_bra
     )
 
 
+def git_worktree_remove(repo_path: Path, worktree_path: Path) -> None:
+    run_cmd(
+        ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(worktree_path)],
+        cwd=repo_path,
+    )
+
+
 def git_commit_all(worktree_path: Path, message: str) -> None:
     run_cmd(["git", "-C", str(worktree_path), "add", "-A"], cwd=worktree_path)
     run_cmd(["git", "-C", str(worktree_path), "commit", "-m", message], cwd=worktree_path)
