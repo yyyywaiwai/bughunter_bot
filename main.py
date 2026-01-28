@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -23,6 +24,7 @@ from repo_ops import (
     git_push,
     git_branch_exists,
     git_worktree_add,
+    git_worktree_prune,
     git_worktree_remove,
     gh_pr_create,
 )
@@ -678,17 +680,12 @@ class BughunterBot(discord.Client):
             return
 
         worktree_path = Path(job.worktree_path).resolve()
-        if not self._is_safe_worktree_path(worktree_path):
-            logging.warning("Skip worktree cleanup: unsafe worktree path %s", worktree_path)
-            return
-        if not worktree_path.exists():
-            return
-
-        try:
-            git_worktree_remove(repo_path, worktree_path)
-            logging.info("Cleaned up worktree %s for job %s", worktree_path, job.id)
-        except CommandError as exc:
-            logging.exception("Failed to cleanup worktree for job %s: %s", job.id, exc)
+        self._force_remove_worktree(
+            repo_path,
+            worktree_path,
+            job_id=job.id,
+            context="cleanup",
+        )
 
     async def _cancel_running_job(self, job_id: int) -> None:
         task = self._tasks.get(job_id)
@@ -714,6 +711,21 @@ class BughunterBot(discord.Client):
             worktree_path = Path(job.worktree_path).resolve()
         if not worktree_path:
             worktree_path = self._worktree_path(repo_path.name, job.thread_id)
+        self._force_remove_worktree(
+            repo_path,
+            worktree_path,
+            job_id=job.id,
+            context="rerun",
+        )
+
+    def _force_remove_worktree(
+        self,
+        repo_path: Path,
+        worktree_path: Path,
+        *,
+        job_id: Optional[int],
+        context: str,
+    ) -> None:
         if not self._is_safe_worktree_path(worktree_path):
             logging.warning("Skip worktree cleanup: unsafe worktree path %s", worktree_path)
             return
@@ -721,9 +733,35 @@ class BughunterBot(discord.Client):
             return
         try:
             git_worktree_remove(repo_path, worktree_path)
-            logging.info("Removed worktree %s for rerun job %s", worktree_path, job.id)
         except CommandError as exc:
-            logging.exception("Failed to remove worktree for rerun job %s: %s", job.id, exc)
+            logging.warning(
+                "Failed to remove worktree (%s) for job %s: %s",
+                context,
+                job_id,
+                exc,
+            )
+            try:
+                git_worktree_prune(repo_path)
+            except CommandError as prune_exc:
+                logging.warning("Failed to prune worktrees for job %s: %s", job_id, prune_exc)
+        if worktree_path.exists():
+            try:
+                shutil.rmtree(worktree_path)
+                logging.info("Force removed worktree %s for job %s", worktree_path, job_id)
+            except OSError as exc:
+                logging.exception(
+                    "Failed to force remove worktree (%s) for job %s: %s",
+                    context,
+                    job_id,
+                    exc,
+                )
+        if worktree_path.exists():
+            logging.warning(
+                "Worktree still exists after cleanup (%s) for job %s: %s",
+                context,
+                job_id,
+                worktree_path,
+            )
 
     def _unique_branch_name(self, repo_path: Path, base: str) -> str:
         if not git_branch_exists(repo_path, base):

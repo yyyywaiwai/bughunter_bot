@@ -78,6 +78,10 @@ def git_worktree_remove(repo_path: Path, worktree_path: Path) -> None:
     )
 
 
+def git_worktree_prune(repo_path: Path) -> None:
+    run_cmd(["git", "-C", str(repo_path), "worktree", "prune"], cwd=repo_path)
+
+
 def git_branch_exists(repo_path: Path, branch: str) -> bool:
     result = subprocess.run(
         ["git", "-C", str(repo_path), "show-ref", "--verify", f"refs/heads/{branch}"],
