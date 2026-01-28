@@ -1,6 +1,6 @@
 # Bughunterbot (Discord Forum -> Claude Agent SDK -> PR)
 
-Discordフォーラムの新規スレッドを検知し、対象リポジトリを `git pull` した後に Claude Agent SDK で原因/仕様/修正を生成し、PRを作成してスレッドに投稿するボットです。
+Discordフォーラムの新規スレッドを検知し、対象リポジトリを `git pull` した後に Claude Agent SDK で原因/仕様/修正や新機能・改善提案を生成し、PRを作成してスレッドに投稿するボットです。
 
 ## 構成
 - `main.py`: Discordボット本体
@@ -65,15 +65,16 @@ FORUM_REPO_MAP={"111111111111111111":"./repos/iMonos","222222222222222222":"./re
 
 ## 動作フロー
 1. フォーラムに新規スレッド作成
-2. Botがジョブを作成し自動で処理開始
+2. Botがジョブを作成（オーナー投稿は自動開始、非オーナー投稿は承認待ち）
 3. 対象リポジトリに `git pull` → worktree 作成
 4. Claude Agent SDK で原因/仕様/修正を実施
 5. コミット & PR作成
 6. スレッドへ結果とPRリンクを投稿
 
 ## コマンド
-- `/approve_job`: 失敗ジョブの再実行などに利用（オーナーのみ）
+- `/approve_job`: 承認待ち/失敗ジョブを開始（オーナーのみ）
 - `/instruct_job`: 追加指示を送信して同じjobに再実行（オーナーのみ）
+- `/rerun_job`: 完了ジョブをリセットして再実行（オーナーのみ）
 
 ## Discord Developer Portal で必要な設定
 1. Bot タブ
@@ -93,7 +94,7 @@ Discord 側に古いスラッシュコマンド定義が残っている可能性
 これで起動時に **既存コマンドをクリア → 再同期** します。
 
 ## 注意点
-- 本実装は **承認なしで自動実行** します（/approve_job は再実行用に残しています）。
+- オーナー投稿は自動実行、非オーナー投稿は `/approve_job` が必要です。
 - Bot には `message_content` Intent が必要です（スレッド本文取得のため）。
 - フォーラムチャンネル側の権限として `send_messages_in_threads` などが必要です。
 - `repos/` と `worktrees/` はリポジトリ管理外です（.gitignore）。

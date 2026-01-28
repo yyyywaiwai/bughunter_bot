@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-from claude_runner import ClaudeRunError, run_claude, touch_claude_session
+from claude_runner import ClaudeRunError, close_claude_session, run_claude, touch_claude_session
 from config import Config, load_config
 from repo_ops import (
     CommandError,
@@ -21,11 +21,21 @@ from repo_ops import (
     git_is_clean,
     git_pull,
     git_push,
+    git_branch_exists,
     git_worktree_add,
     git_worktree_remove,
     gh_pr_create,
 )
-from storage import Job, approve_job, create_job, get_job, get_job_by_thread, init_db, update_job_status
+from storage import (
+    Job,
+    approve_job,
+    create_job,
+    get_job,
+    get_job_by_thread,
+    init_db,
+    reset_job_for_rerun,
+    update_job_status,
+)
 
 
 MAX_MESSAGE_LEN = 1900
@@ -66,10 +76,12 @@ class BughunterBot(discord.Client):
         if guild is not None:
             self.tree.add_command(self.approve_job, guild=guild)
             self.tree.add_command(self.instruct_job, guild=guild)
+            self.tree.add_command(self.rerun_job, guild=guild)
             logging.info("Local guild commands: %s", [cmd.name for cmd in self.tree.get_commands(guild=guild)])
         else:
             self.tree.add_command(self.approve_job)
             self.tree.add_command(self.instruct_job)
+            self.tree.add_command(self.rerun_job)
             logging.info("Local global commands: %s", [cmd.name for cmd in self.tree.get_commands()])
         if guild is not None:
             synced = await self.tree.sync(guild=guild)
@@ -98,6 +110,10 @@ class BughunterBot(discord.Client):
                     job_id = _extract_option_int(options, "job_id")
                     instruction = _extract_option_str(options, "instruction") or ""
                     await self._handle_instruct(interaction, instruction, job_id)
+                    return
+                if name in {"rerun_job", "rerun"}:
+                    job_id = _extract_option_int(options, "job_id")
+                    await self._handle_rerun(interaction, job_id)
                     return
         except Exception as exc:
             logging.exception("Failed to handle interaction: %s", exc)
@@ -130,12 +146,15 @@ class BughunterBot(discord.Client):
             logging.exception("Failed to create job: %s", exc)
             return
 
-        await self._safe_send(
-            thread,
-            (
-                f"Job ID: {job.id}"
-            ),
-        )
+        await self._safe_send(thread, f"Job ID: {job.id}")
+
+        author_id = await self._get_thread_owner_id(thread)
+        if author_id not in self.config.owner_ids:
+            await self._safe_send(
+                thread,
+                "このスレッドは承認待ちです。/approve_job で開始してください。",
+            )
+            return
 
         if job.id in self._tasks:
             return
@@ -156,7 +175,7 @@ class BughunterBot(discord.Client):
             touch_claude_session(str(job.id))
         await self._cleanup_worktree_for_thread(after)
 
-    @app_commands.command(name="approve_job", description="承認済みジョブを開始します")
+    @app_commands.command(name="approve_job", description="承認待ちジョブを開始します")
     @app_commands.describe(job_id="承認するJob ID（スレ内なら省略可）")
     async def approve_job(self, interaction: discord.Interaction, job_id: Optional[int] = None) -> None:
         await self._handle_approve(interaction, job_id)
@@ -170,6 +189,11 @@ class BughunterBot(discord.Client):
         job_id: Optional[int] = None,
     ) -> None:
         await self._handle_instruct(interaction, instruction, job_id)
+
+    @app_commands.command(name="rerun_job", description="完了ジョブを再実行します")
+    @app_commands.describe(job_id="再実行するJob ID（スレ内なら省略可）")
+    async def rerun_job(self, interaction: discord.Interaction, job_id: Optional[int] = None) -> None:
+        await self._handle_rerun(interaction, job_id)
 
     async def _handle_approve(self, interaction: discord.Interaction, job_id: Optional[int]) -> None:
         if interaction.user.id not in self.config.owner_ids:
@@ -247,6 +271,52 @@ class BughunterBot(discord.Client):
         task = asyncio.create_task(self._process_job_instruction(job, instruction))
         self._tasks[job.id] = task
 
+    async def _handle_rerun(self, interaction: discord.Interaction, job_id: Optional[int]) -> None:
+        if interaction.user.id not in self.config.owner_ids:
+            await interaction.response.send_message("権限がありません。", ephemeral=True)
+            return
+
+        job = None
+        if job_id is None and isinstance(interaction.channel, discord.Thread):
+            job = get_job_by_thread(self.db_path, interaction.channel.id)
+        elif job_id is not None:
+            job = get_job(self.db_path, job_id)
+
+        if not job:
+            await interaction.response.send_message("対象ジョブが見つかりません。", ephemeral=True)
+            return
+        if job.status == "pending_approval":
+            await interaction.response.send_message(
+                "このジョブは承認待ちです。/approve_job を使用してください。",
+                ephemeral=True,
+            )
+            return
+
+        await self._cancel_running_job(job.id)
+
+        repo_path = Path(job.repo_path).resolve()
+        if not repo_path.exists():
+            mapped_path = self.config.forum_repo_map.get(int(job.forum_id))
+            if mapped_path:
+                repo_path = mapped_path.resolve()
+        if not self._is_safe_repo_path(repo_path) or not repo_path.exists():
+            await interaction.response.send_message("リポジトリが見つかりません。", ephemeral=True)
+            return
+
+        await self._remove_worktree_for_job(job, repo_path)
+        refreshed = reset_job_for_rerun(self.db_path, job.id, interaction.user.id)
+        job = refreshed or job
+
+        await interaction.response.send_message(
+            f"再実行します。Job ID: {job.id}",
+            ephemeral=True,
+        )
+
+        if job.id in self._tasks:
+            return
+        task = asyncio.create_task(self._process_job(job))
+        self._tasks[job.id] = task
+
     async def _process_job(self, job: Job) -> None:
         thread = await self._fetch_thread(int(job.thread_id))
         if not thread:
@@ -277,7 +347,8 @@ class BughunterBot(discord.Client):
                 int(job.forum_id),
                 self.config.default_base_branch,
             )
-            branch = f"bughunter/thread-{job.thread_id}"
+            branch_base = f"bughunter/thread-{job.thread_id}"
+            branch = self._unique_branch_name(repo_path, branch_base)
             worktree_path = self._worktree_path(repo_path.name, job.thread_id)
             if worktree_path.exists():
                 raise RuntimeError("worktreeが既に存在します")
@@ -521,17 +592,19 @@ class BughunterBot(discord.Client):
             f"{context}\n\n"
             f"{extra}\n"
             "要件:\n"
-            "1. 原因を特定し、簡潔に説明する。\n"
-            "2. 修正/実装の仕様をMarkdownで書く（箇条書き可）。\n"
+            "1. 依頼がバグ修正/新機能/改善提案のどれかを判定し、必要なら背景や原因を簡潔に説明する。\n"
+            "2. 仕様または提案内容をMarkdownで書く（箇条書き可）。\n"
             "3. 必要なコード変更を実装する。\n"
             "4. PRタイトルとPR本文を提案する。\n\n"
             "制約:\n"
             "- git操作や外部コマンドは実行しない。\n"
             "- 変更は最小限にし、既存設計を尊重する。\n\n"
             "出力フォーマット:\n"
-            "## 原因\n"
+            "## 種別\n"
             "...\n\n"
-            "## 仕様\n"
+            "## 背景/原因\n"
+            "...\n\n"
+            "## 仕様/提案\n"
             "...\n\n"
             "## 変更概要\n"
             "...\n\n"
@@ -559,6 +632,16 @@ class BughunterBot(discord.Client):
             await thread.send(content)
         except discord.HTTPException as exc:
             logging.warning("Failed to send message: %s", exc)
+
+    async def _get_thread_owner_id(self, thread: discord.Thread) -> Optional[int]:
+        owner_id = getattr(thread, "owner_id", None)
+        if owner_id:
+            return owner_id
+        try:
+            starter = await thread.fetch_message(thread.id)
+        except (discord.NotFound, discord.HTTPException):
+            return None
+        return getattr(starter.author, "id", None)
 
     def _is_safe_repo_path(self, repo_path: Path) -> bool:
         try:
@@ -606,6 +689,47 @@ class BughunterBot(discord.Client):
             logging.info("Cleaned up worktree %s for job %s", worktree_path, job.id)
         except CommandError as exc:
             logging.exception("Failed to cleanup worktree for job %s: %s", job.id, exc)
+
+    async def _cancel_running_job(self, job_id: int) -> None:
+        task = self._tasks.get(job_id)
+        if task:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except asyncio.TimeoutError:
+                logging.warning("Timed out waiting for job %s cancellation", job_id)
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logging.exception("Error while cancelling job %s: %s", job_id, exc)
+            self._tasks.pop(job_id, None)
+        try:
+            await close_claude_session(str(job_id))
+        except Exception as exc:
+            logging.warning("Failed to close Claude session %s: %s", job_id, exc)
+
+    async def _remove_worktree_for_job(self, job: Job, repo_path: Path) -> None:
+        worktree_path = None
+        if job.worktree_path:
+            worktree_path = Path(job.worktree_path).resolve()
+        if not worktree_path:
+            worktree_path = self._worktree_path(repo_path.name, job.thread_id)
+        if not self._is_safe_worktree_path(worktree_path):
+            logging.warning("Skip worktree cleanup: unsafe worktree path %s", worktree_path)
+            return
+        if not worktree_path.exists():
+            return
+        try:
+            git_worktree_remove(repo_path, worktree_path)
+            logging.info("Removed worktree %s for rerun job %s", worktree_path, job.id)
+        except CommandError as exc:
+            logging.exception("Failed to remove worktree for rerun job %s: %s", job.id, exc)
+
+    def _unique_branch_name(self, repo_path: Path, base: str) -> str:
+        if not git_branch_exists(repo_path, base):
+            return base
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        return f"{base}-{suffix}"
 
     async def _send_completion_embed(
         self,

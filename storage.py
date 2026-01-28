@@ -120,6 +120,23 @@ def update_job_status(
     return get_job(db_path, job_id)
 
 
+def reset_job_for_rerun(db_path: Path, job_id: int, approver_id: int) -> Optional[Job]:
+    now = _utcnow()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, approver_id = ?, pr_url = NULL,
+                worktree_path = NULL, branch = NULL, error = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            ("approved", str(approver_id), now, job_id),
+        )
+        conn.commit()
+    return get_job(db_path, job_id)
+
+
 def _row_to_job(row: tuple) -> Job:
     return Job(
         id=row[0],

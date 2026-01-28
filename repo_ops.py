@@ -78,6 +78,16 @@ def git_worktree_remove(repo_path: Path, worktree_path: Path) -> None:
     )
 
 
+def git_branch_exists(repo_path: Path, branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "show-ref", "--verify", f"refs/heads/{branch}"],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def git_commit_all(worktree_path: Path, message: str) -> None:
     run_cmd(["git", "-C", str(worktree_path), "add", "-A"], cwd=worktree_path)
     run_cmd(["git", "-C", str(worktree_path), "commit", "-m", message], cwd=worktree_path)
